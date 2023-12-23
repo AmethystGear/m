@@ -1,63 +1,84 @@
-use std::time::SystemTime;
+use bevy::{prelude::*, sprite::MaterialMesh2dBundle};
 
-use bevy::{
-    prelude::*,
-    render::{mesh::Indices, render_resource::PrimitiveTopology},
-    sprite::MaterialMesh2dBundle,
-    window::CursorGrabMode,
+use bevy_prototype_lyon::{
+    draw::{Fill, Stroke},
+    entity::ShapeBundle,
+    path::PathBuilder,
+    plugin::ShapePlugin,
 };
-
+use bullet::bullet_system;
+use mesh::{mesh_to_collider, verts_to_mesh};
+use mouse::{mouse_world_coords, MouseWorldCoords};
 use noise::{Fbm, NoiseFn, Simplex};
 
 use bevy_rapier2d::prelude::*;
 use level_gen::{marching_squares::marching_squares, matrix::Matrix, point::Point, tiles::Tiles};
+use player::{player_control, setup_player, Player};
+use turret::{turret_system, Turret};
 
+mod bullet;
 mod level_gen;
+mod mesh;
+mod mouse;
+mod player;
+mod turret;
+
+#[derive(Component)]
+pub struct Environment;
 
 fn main() {
     App::new()
         .insert_resource(Msaa::Off)
+        .insert_resource(MouseWorldCoords(Vec2::ZERO))
         .add_plugins((
             DefaultPlugins,
-            RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0),
+            ShapePlugin,
+            RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(1.0),
         ))
-        .add_systems(Startup, (setup_player, setup_camera, setup_env))
+        .add_systems(
+            Startup,
+            (setup_camera, setup_env, setup_player, setup_trajectory_line),
+        )
         .add_systems(
             Update,
             (
-                grab_mouse,
+                zoom,
                 player_control,
-                camera_follow.after(player_control),
+                camera_follow,
+                mouse_world_coords.before(player_control),
+                bullet_system,
+                turret_system
             ),
         )
         .run();
 }
 
-#[derive(Component)]
-struct Player {
-    speed: f32,
+fn setup_trajectory_line(mut commands: Commands) {
+    let mut path_builder = PathBuilder::new();
+    path_builder.close();
+    let path = path_builder.build();
 
-}
-
-fn grab_mouse(
-    mut windows: Query<&mut Window>,
-    mouse: Res<Input<MouseButton>>,
-    key: Res<Input<KeyCode>>,
-) {
-    let mut window = windows.single_mut();
-    if mouse.just_pressed(MouseButton::Left) {
-        window.cursor.visible = false;
-        window.cursor.grab_mode = CursorGrabMode::Locked;
-    }
-
-    if key.just_pressed(KeyCode::Escape) {
-        window.cursor.visible = true;
-        window.cursor.grab_mode = CursorGrabMode::None;
-    }
+    commands.spawn((
+        ShapeBundle {
+            path,
+            spatial: SpatialBundle {
+                transform: Transform::from_xyz(0.0, 0.0, 5.0),
+                ..default()
+            },
+            ..default()
+        },
+        Stroke::new(Color::RED, 2.0),
+        Fill::color(Color::RED),
+    ));
 }
 
 fn setup_camera(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
+}
+
+fn zoom(mut query: Query<&mut OrthographicProjection, With<Camera2d>>) {
+    let mut projection = query.single_mut();
+    projection.scale = 1.0;
 }
 
 fn camera_follow(
@@ -67,139 +88,6 @@ fn camera_follow(
     let player = players.single();
     let mut transform = cameras.single_mut();
     transform.translation = player.translation;
-}
-
-/// generates the player's mesh
-fn player_mesh() -> Mesh {
-    let scale = 10.0;
-    let vertices: Vec<Vec3> = vec![
-        (-1.0, -1.0, 0.0),
-        (1.0, -1.0, 0.0),
-        (1.0, 1.0, 0.0),
-        (-1.0, 1.0, 0.0),
-        (-0.5, -0.5, 0.0),
-        (0.5, -0.5, 0.0),
-        (0.5, 0.5, 0.0),
-        (-0.5, 0.5, 0.0),
-    ]
-    .into_iter()
-    .map(|x| x.into())
-    .map(|x: Vec3| x * scale)
-    .collect();
-
-    let indices = vec![
-        0, 4, 5, 0, 5, 1, 1, 5, 6, 1, 6, 2, 2, 6, 7, 2, 7, 3, 3, 7, 4, 3, 4, 0,
-    ];
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
-    mesh.set_indices(Some(Indices::U32(indices)));
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
-    mesh
-}
-
-/// converts a bevy mesh into a rapier2d trimesh collider
-fn mesh_to_collider(mesh: &Mesh) -> Collider {
-    let ind: Vec<_> = mesh.indices().unwrap().iter().collect();
-    let vertices = get_mesh_verts(mesh);
-    let mut indices = vec![];
-    for i in 0..ind.len() / 3 {
-        indices.push([
-            ind[i * 3] as u32,
-            ind[i * 3 + 1] as u32,
-            ind[i * 3 + 2] as u32,
-        ]);
-    }
-    Collider::trimesh(vertices, indices)
-}
-
-fn get_mesh_verts(mesh: &Mesh) -> Vec<Vec2> {
-    mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-        .unwrap()
-        .as_float3()
-        .unwrap()
-        .iter()
-        .map(|[x, y, _]| (*x, *y).into())
-        .collect()
-}
-
-fn setup_player(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-) {
-    let player = Player {
-        speed: 7.0,
-    };
-
-    let mesh = player_mesh();
-    commands.spawn((
-        RigidBody::Dynamic,
-        Velocity::default(),
-        GravityScale(0.0),
-        Sleeping::disabled(),
-        Ccd::enabled(),
-        Collider::ball(10.0),
-        Friction::coefficient(0.0),
-        LockedAxes::ROTATION_LOCKED,
-        ActiveEvents::COLLISION_EVENTS,
-        MaterialMesh2dBundle {
-            mesh: meshes.add(mesh).into(),
-            material: materials.add(ColorMaterial::from(Color::WHITE)),
-            transform: Transform::from_translation(Vec3::new(0.0, 0.0, 1.0)),
-            ..default()
-        },
-        ExternalImpulse::default(),
-        player,
-    ));
-}
-
-fn player_control(
-    keyboard: Res<Input<KeyCode>>,
-    mut windows: Query<&Window>,
-    mut query: Query<(&mut ExternalImpulse, &mut Transform, &Velocity, &mut Player)>,
-) {
-    let (mut impulse, mut transform, vel, mut player) = query.single_mut();
-    // movement
-    let mut moving = false;
-    let mut dir = Vec2::new(0.0, 0.0);
-    if keyboard.pressed(KeyCode::W) {
-        dir += Vec2::Y;
-        moving = true;
-    }
-    if keyboard.pressed(KeyCode::A) {
-        dir += Vec2::NEG_X;
-        moving = true;
-    }
-    if keyboard.pressed(KeyCode::S) {
-        dir += Vec2::NEG_Y;
-        moving = true;
-    }
-    if keyboard.pressed(KeyCode::D) {
-        dir += Vec2::X;
-        moving = true;
-    }
-
-
-    impulse.impulse = dir * player.speed - vel.linvel * 0.01;
-
-    // rotate to cursor
-    let window = windows.single_mut();
-    if let Some(cursor) = window.cursor_position() {
-        let diff = cursor
-            - Vec2 {
-                x: window.width() / 2.0,
-                y: window.height() / 2.0,
-            };
-        let angle = diff.y.atan2(diff.x);
-        transform.rotation = Quat::from_rotation_z(angle);
-    }
-}
-
-fn verts_to_mesh(verts: Vec<Vec3>) -> Mesh {
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
-    let num_verts = verts.len() as u32;
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, verts);
-    mesh.set_indices(Some(Indices::U32((0..num_verts).collect())));
-    mesh
 }
 
 fn setup_env(
@@ -225,9 +113,18 @@ fn setup_env(
     let (verts, coll_verts) = marching_squares(&tiles);
     let mesh = verts_to_mesh(verts);
     let coll_mesh = verts_to_mesh(coll_verts.clone());
+
+
+
     commands.spawn((
         RigidBody::Fixed,
+        Environment,
         mesh_to_collider(&coll_mesh),
+        Restitution {
+            coefficient: 1.0,
+            combine_rule: CoefficientCombineRule::Max,
+        },
+        Friction::coefficient(1.0),
         MaterialMesh2dBundle {
             mesh: meshes.add(mesh).into(),
             material: materials.add(ColorMaterial::from(Color::BLACK)),

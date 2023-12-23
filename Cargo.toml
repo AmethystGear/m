@@ -8,9 +8,12 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.75"
 bevy = "0.12.1"
+bevy_prototype_lyon = "0.10.0"
 bevy_rapier2d = "0.23.0"
+itertools = "0.12.0"
 lazy_static = "1.4.0"
 noise = "0.8.2"
+rand = "0.8.5"
 
 
 # good 
